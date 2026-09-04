@@ -37,6 +37,71 @@ const C = {
 
 const FONT = '"SF Mono", "Cascadia Code", "Fira Code", "Courier New", monospace';
 
+// ── Deterministic Noise (Perlin-style) ──
+// Pre-compute permutation table and gradient vectors for stable procedural textures
+const _PERM = new Uint8Array(512);
+const _GRAD: [number, number][] = [];
+{
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  let seed = 42;
+  const rng = () => { seed = (seed * 16807 + 0) % 2147483647; return (seed - 1) / 2147483646; };
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [p[i], p[j]] = [p[j], p[i]];
+  }
+  for (let i = 0; i < 512; i++) _PERM[i] = p[i & 255];
+  for (let i = 0; i < 256; i++) {
+    const angle = (i / 256) * Math.PI * 2;
+    _GRAD.push([Math.cos(angle), Math.sin(angle)]);
+  }
+}
+
+function _fade(t: number): number { return t * t * t * (t * (t * 6 - 15) + 10); }
+function _lerp(a: number, b: number, t: number): number { return a + t * (b - a); }
+function _dotGrad(hash: number, x: number, y: number): number {
+  const g = _GRAD[hash & 255];
+  return g[0] * x + g[1] * y;
+}
+
+function _noise2D(x: number, y: number): number {
+  const X = Math.floor(x);
+  const Y = Math.floor(y);
+  const xf = x - X;
+  const yf = y - Y;
+  const xi = X & 255;
+  const yi = Y & 255;
+  const u = _fade(xf);
+  const v = _fade(yf);
+  const aa = _PERM[_PERM[xi] + yi];
+  const ab = _PERM[_PERM[xi] + yi + 1];
+  const ba = _PERM[_PERM[xi + 1] + yi];
+  const bb = _PERM[_PERM[xi + 1] + yi + 1];
+  const x1 = _lerp(_dotGrad(aa, xf, yf), _dotGrad(ba, xf - 1, yf), u);
+  const x2 = _lerp(_dotGrad(ab, xf, yf - 1), _dotGrad(bb, xf - 1, yf - 1), u);
+  return _lerp(x1, x2, v); // roughly -1 to 1
+}
+
+function _fbm(x: number, y: number, octaves: number, persistence = 0.5, lacunarity = 2.0): number {
+  let total = 0, frequency = 1, amplitude = 1, maxValue = 0;
+  for (let i = 0; i < octaves; i++) {
+    total += _noise2D(x * frequency, y * frequency) * amplitude;
+    maxValue += amplitude;
+    amplitude *= persistence;
+    frequency *= lacunarity;
+  }
+  return total / maxValue;
+}
+
+// Simple deterministic hash for point-like noise (replaces Math.random for scatter patterns)
+function _hash(x: number, y: number): number {
+  let h = (x * 374761393 + y * 668265263 + 1013904223) | 0;
+  h = ((h >>> 16) ^ h) * 0x45d9f3b | 0;
+  h = ((h >>> 16) ^ h) * 0x45d9f3b | 0;
+  h = (h >>> 16) ^ h;
+  return (h & 0x7fffffff) / 0x7fffffff; // 0..1
+}
+
 // ── Helpers ──
 
 function buildPath(ctx: CanvasRenderingContext2D, pts: { x: number; y: number }[]) {
@@ -649,21 +714,26 @@ export function renderCanvas(
   }
 
   if (['stonewash', 'acid-wash', 'brut-de-forge'].includes(config.finishType)) {
-    ctx.fillStyle = config.finishType === 'brut-de-forge' ? 'rgba(0,0,0,0.12)' : 'rgba(0,0,0,0.06)';
+    const baseAlpha = config.finishType === 'brut-de-forge' ? 0.12 : 0.06;
     for (let y = minY; y < maxY; y += 2) {
       for (let x = minX; x < maxX; x += 2) {
-        if (Math.random() > 0.55) {
+        const h = _hash(Math.round(x), Math.round(y));
+        if (h > 0.55) {
+          ctx.fillStyle = `rgba(0,0,0,${baseAlpha * (0.5 + h * 0.5)})`;
           ctx.fillRect(x, y, 1.5, 1.5);
         }
       }
     }
     if (config.finishType === 'brut-de-forge') {
-      // Hammer marks near the spine
+      // Deterministic hammer marks near the spine
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       for (let i = 0; i < 40; i++) {
-        const hy = minY + Math.random() * (maxY - minY) * 0.4; // Mostly upper half
+        const hx = _hash(i * 7 + 13, i * 3 + 7);
+        const hy = _hash(i * 11 + 5, i * 5 + 3);
+        const hr = _hash(i * 17 + 1, i * 2 + 9);
+        const markY = minY + hy * (maxY - minY) * 0.4;
         ctx.beginPath();
-        ctx.ellipse(minX + Math.random()*(maxX-minX), hy, 4+Math.random()*6, 2+Math.random()*4, Math.random()*Math.PI, 0, Math.PI*2);
+        ctx.ellipse(minX + hx * (maxX - minX), markY, 4 + hr * 6, 2 + hr * 4, hr * Math.PI, 0, Math.PI * 2);
         ctx.fill();
       }
       // Forge soot/scale near the spine
@@ -674,15 +744,17 @@ export function renderCanvas(
       ctx.fillRect(minX, minY, maxX - minX, 40);
     }
     if (config.finishType === 'stonewash') {
-      // Subtle scratch marks
+      // Deterministic subtle scratch marks
       ctx.strokeStyle = 'rgba(255,255,255,0.04)';
       ctx.lineWidth = 0.5;
       for (let i = 0; i < 100; i++) {
-        const sx = minX + Math.random() * (maxX - minX);
-        const sy = minY + Math.random() * (maxY - minY);
+        const sx = minX + _hash(i * 13, i * 7 + 100) * (maxX - minX);
+        const sy = minY + _hash(i * 7 + 200, i * 13) * (maxY - minY);
+        const dx = (_hash(i * 3, i * 19) - 0.5) * 20;
+        const dy = (_hash(i * 19 + 50, i * 3) - 0.5) * 20;
         ctx.beginPath();
         ctx.moveTo(sx, sy);
-        ctx.lineTo(sx + (Math.random()-0.5)*20, sy + (Math.random()-0.5)*20);
+        ctx.lineTo(sx + dx, sy + dy);
         ctx.stroke();
       }
     }
@@ -699,20 +771,22 @@ export function renderCanvas(
     ctx.fillStyle = 'rgba(0,0,0,0.1)';
     ctx.beginPath(); ctx.moveTo(minX + 100, minY - 20); ctx.lineTo(minX + 150, minY - 20); ctx.lineTo(minX + 80, maxY + 20); ctx.lineTo(minX + 30, maxY + 20); ctx.fill();
   } else if (config.finishType === 'satin') {
-    // Horizontal brushed lines for satin finish (premium micro-scratches)
+    // Horizontal brushed lines for satin finish — deterministic jitter
     ctx.strokeStyle = 'rgba(255,255,255,0.06)';
     ctx.lineWidth = 0.5;
     for (let y = minY; y < maxY; y += 1.5) {
+      const jitter = (_hash(Math.round(y * 10), 999) - 0.5) * 0.5;
       ctx.beginPath();
-      ctx.moveTo(minX - 10, y + (Math.random() - 0.5) * 0.5);
-      ctx.lineTo(maxX + 10, y + (Math.random() - 0.5) * 0.5);
+      ctx.moveTo(minX - 10, y + jitter);
+      ctx.lineTo(maxX + 10, y + jitter);
       ctx.stroke();
     }
     ctx.strokeStyle = 'rgba(0,0,0,0.03)';
     for (let y = minY; y < maxY; y += 2) {
+      const jitter = (_hash(Math.round(y * 10), 1234) - 0.5) * 0.5;
       ctx.beginPath();
-      ctx.moveTo(minX - 10, y + (Math.random() - 0.5) * 0.5);
-      ctx.lineTo(maxX + 10, y + (Math.random() - 0.5) * 0.5);
+      ctx.moveTo(minX - 10, y + jitter);
+      ctx.lineTo(maxX + 10, y + jitter);
       ctx.stroke();
     }
   }
@@ -1073,30 +1147,84 @@ export function renderCanvas(
         ctx.stroke();
       }
     } else if (config.handleMaterial === 'resin-hybrid') {
-      // Swirly resin pattern
-      ctx.fillStyle = 'rgba(0,255,255,0.15)';
-      for (let i = 0; i < 20; i++) {
-        ctx.beginPath();
-        ctx.ellipse(
-          minX + Math.random()*(maxX-minX), 
-          hMinY + Math.random()*(hMaxY-hMinY), 
-          20 + Math.random()*50, 
-          10 + Math.random()*25, 
-          Math.random()*Math.PI, 0, Math.PI*2
-        );
-        ctx.fill();
+      // ═══ Premium Procedural Resin — Domain-warped FBM ═══
+      // Uses deterministic noise so texture stays stable across camera movements
+      const hW = maxX - minX;
+      const hH = hMaxY - hMinY;
+      const step = 3; // pixel step for performance
+
+      for (let py = hMinY; py < hMaxY; py += step) {
+        for (let px = minX; px < maxX; px += step) {
+          // Normalize coords
+          const nx = (px - minX) / hW;
+          const ny = (py - hMinY) / hH;
+
+          // Domain warping: warp coordinates with noise for organic swirls
+          const qx = _fbm(nx * 4.0, ny * 4.0, 4);
+          const qy = _fbm(nx * 4.0 + 5.2, ny * 4.0 + 1.3, 4);
+          const warpedNoise = _fbm(nx * 4.0 + qx * 2.5, ny * 4.0 + qy * 2.5, 5);
+
+          // Secondary swirl layer for depth
+          const rx = _fbm(nx * 6.0 + warpedNoise * 1.5 + 3.7, ny * 6.0 + 9.2, 3);
+          const ry = _fbm(nx * 6.0 + 8.3, ny * 6.0 + warpedNoise * 1.5 + 2.8, 3);
+          const deepSwirl = _fbm(nx * 6.0 + rx * 2.0, ny * 6.0 + ry * 2.0, 4);
+
+          // Combine layers (range roughly -1 to 1, normalize to 0..1)
+          const combined = (warpedNoise * 0.6 + deepSwirl * 0.4 + 1.0) * 0.5;
+
+          // Color mapping: deep blue resin base with cyan/teal highlights and subtle gold flecks
+          const t = Math.max(0, Math.min(1, combined));
+
+          // Base color: deep ocean blue -> bright teal
+          let r = 5 + t * 45;
+          let g = 20 + t * 160;
+          let b = 55 + t * 200;
+
+          // Gold/amber fleck highlights in peaks
+          const fleckNoise = _fbm(px * 0.15, py * 0.15, 2);
+          if (fleckNoise > 0.72) {
+            const fleckIntensity = (fleckNoise - 0.72) / 0.28;
+            r = r + (210 - r) * fleckIntensity * 0.6;
+            g = g + (175 - g) * fleckIntensity * 0.5;
+            b = b * (1 - fleckIntensity * 0.7);
+          }
+
+          // Overall alpha: semi-transparent so the handle gradient shows through
+          const alpha = 0.45 + t * 0.3;
+
+          ctx.fillStyle = `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${alpha.toFixed(2)})`;
+          ctx.fillRect(px, py, step, step);
+        }
       }
-      // Bright resin streaks
-      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+
+      // Specular highlight band (gloss effect over resin)
+      const glossGrad = ctx.createLinearGradient(0, hMinY, 0, hMaxY);
+      glossGrad.addColorStop(0, 'rgba(255,255,255,0.25)');
+      glossGrad.addColorStop(0.15, 'rgba(255,255,255,0.08)');
+      glossGrad.addColorStop(0.4, 'rgba(255,255,255,0)');
+      glossGrad.addColorStop(0.6, 'rgba(255,255,255,0)');
+      glossGrad.addColorStop(0.85, 'rgba(255,255,255,0.04)');
+      glossGrad.addColorStop(1, 'rgba(255,255,255,0.15)');
+      ctx.fillStyle = glossGrad;
+      ctx.fillRect(minX, hMinY, hW, hH);
+
+      // Diagonal shine streak for wet/glossy resin look
+      ctx.save();
+      ctx.globalAlpha = 0.18;
+      ctx.strokeStyle = 'rgba(255,255,255,1)';
+      ctx.lineWidth = 6;
+      const shineX = minX + hW * 0.3;
+      ctx.beginPath();
+      ctx.moveTo(shineX + 30, hMinY - 5);
+      ctx.lineTo(shineX - 15, hMaxY + 5);
+      ctx.stroke();
       ctx.lineWidth = 2;
-      for (let i = 0; i < 8; i++) {
-         ctx.beginPath();
-         const sx = minX + Math.random()*(maxX-minX);
-         const sy = hMinY + Math.random()*(hMaxY-hMinY);
-         ctx.moveTo(sx, sy);
-         ctx.quadraticCurveTo(sx + 30, sy - 20, sx + 60, sy + 10);
-         ctx.stroke();
-      }
+      ctx.globalAlpha = 0.1;
+      ctx.beginPath();
+      ctx.moveTo(shineX + 55, hMinY - 5);
+      ctx.lineTo(shineX + 10, hMaxY + 5);
+      ctx.stroke();
+      ctx.restore();
     }
     
     ctx.restore();
