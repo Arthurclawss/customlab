@@ -4,12 +4,20 @@ import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
 import { Environment, OrbitControls, Center } from '@react-three/drei';
 import { EffectComposer, Bloom, N8AO } from '@react-three/postprocessing';
-import { Suspense } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useLabStore } from '@/store/useLabStore';
 import { ThreeKnife } from './ThreeKnife';
 
 export function ThreeViewer() {
   const { config, points } = useLabStore();
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth < 768);
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
 
   return (
     <div 
@@ -19,13 +27,15 @@ export function ThreeViewer() {
       }}
     >
       <Canvas 
-        shadows 
+        shadows={!isMobile} 
         camera={{ position: [0, 2, 25], fov: 35 }} 
+        dpr={isMobile ? [1, 1] : [1, 2]} // Extreme performance gain on mobile
         gl={{ 
-          antialias: true, 
+          antialias: !isMobile, 
           toneMapping: THREE.ACESFilmicToneMapping, 
           toneMappingExposure: 1.0,
-          preserveDrawingBuffer: true
+          preserveDrawingBuffer: true,
+          powerPreference: "high-performance"
         }}
       >
         <Suspense fallback={null}>
@@ -41,8 +51,8 @@ export function ThreeViewer() {
             angle={0.8} 
             penumbra={1} 
             intensity={1.2} 
-            castShadow
-            shadow-mapSize={[2048, 2048]}
+            castShadow={!isMobile}
+            shadow-mapSize={isMobile ? [512, 512] : [2048, 2048]}
             shadow-bias={-0.0001}
             color="#ffffff"
           />
@@ -100,11 +110,13 @@ export function ThreeViewer() {
             minPolarAngle={Math.PI / 4}
           />
           
-          {/* Post Processing for AAA realism */}
-          <EffectComposer multisampling={4}>
-            <N8AO aoRadius={1.5} intensity={1.0} halfRes={true} color="#000000" />
-            <Bloom luminanceThreshold={1.5} mipmapBlur intensity={0.2} />
-          </EffectComposer>
+          {/* Post Processing for AAA realism - Disabled on mobile for performance */}
+          {!isMobile && (
+            <EffectComposer multisampling={4}>
+              <N8AO aoRadius={1.5} intensity={1.0} halfRes={true} color="#000000" />
+              <Bloom luminanceThreshold={1.5} mipmapBlur intensity={0.2} />
+            </EffectComposer>
+          )}
         </Suspense>
       </Canvas>
     </div>
